@@ -273,38 +273,27 @@ public class DataCenterReconciliationController {
                 // custom objects api doesn't give us a nice way to pass in the type we want so we do it manually
                 final Backup backup;
                 {
-                    final Call call = customObjectsApi.getNamespacedCustomObjectCall("stable.instaclustr.com", "v1", "default", "cassandra-backups", dataCenterSpec.getRestoreFromBackup(), null, null);
+                    final Call call = customObjectsApi.getNamespacedCustomObjectCall("stable.instaclustr.com", "v1", statefulSetMetadata.getNamespace(), "cassandra-backups", dataCenterSpec.getRestoreFromBackup(), null, null);
                     backup = customObjectsApi.getApiClient().<Backup>execute(call, new TypeToken<Backup>() {}.getType()).getData();
                 }
 
                 podSpec.addInitContainersItem(new V1Container()
-                                .name("sidecar-restore")
-                                .env(dataCenterSpec.getEnv())
-                                .image(dataCenterSpec.getSidecarImage())
-                                .imagePullPolicy(dataCenterSpec.getImagePullPolicy())
-                                .command(ImmutableList.of(
-                                        "java", "-XX:+UnlockExperimentalVMOptions", "-XX:+UseCGroupMemoryLimitForHeap",
-                                        "-cp", "/opt/lib/cassandra-sidecar/cassandra-sidecar.jar",
-                                        "com.instaclustr.cassandra.sidecar.SidecarRestore",
-                                        "-bb", backup.getSpec().getTarget(), // bucket name
-                                        "-c", dataCenterMetadata.getName(), // clusterID == DcName. Backup dc and restore dc must have the same name
-                                        "-bi", dataCenterChildObjectName("%s"), // pod name prefix
-                                        "-s", backup.getMetadata().getName(), // backup tag used to find the manifest file
-                                        "--bs", backup.getSpec().getBackupType(),
-                                        "-rs",
-                                        "--cd", "/tmp/sidecar-config-volume" // location where the restore task can write config fragments
-                                ))
-                                .addVolumeMountsItem(new V1VolumeMount()
-                                        .name("pod-info")
-                                        .mountPath("/etc/podinfo")
-                                ).addVolumeMountsItem(new V1VolumeMount()
-                                        .name("sidecar-config-volume")
-                                        .mountPath("/tmp/sidecar-config-volume")
-                                ).addVolumeMountsItem(new V1VolumeMount()
-                                        .name("cassandra-data-volume")
-                                        .mountPath("/var/lib/cassandra")
-                                )
-                        );
+                        .name("sidecar-restore")
+                        .env(dataCenterSpec.getEnv())
+                        .image(dataCenterSpec.getSidecarImage())
+                        .imagePullPolicy(dataCenterSpec.getImagePullPolicy())
+                        .command(getRestoreCommand(backup))
+                        .addVolumeMountsItem(new V1VolumeMount()
+                                .name("pod-info")
+                                .mountPath("/etc/podinfo")
+                        ).addVolumeMountsItem(new V1VolumeMount()
+                                .name("sidecar-config-volume")
+                                .mountPath("/tmp/sidecar-config-volume")
+                        ).addVolumeMountsItem(new V1VolumeMount()
+                                .name("cassandra-data-volume")
+                                .mountPath("/var/lib/cassandra")
+                        )
+                );
             }
 
             final V1beta2StatefulSet statefulSet = new V1beta2StatefulSet()
@@ -333,6 +322,26 @@ public class DataCenterReconciliationController {
                     () -> replaceStatefulSet(statefulSet)
             );
         }
+    }
+
+    private List<String> getRestoreCommand(Backup backup) {
+        List<String> command = new ArrayList<>(Arrays.asList(
+                "java", "-XX:+UnlockExperimentalVMOptions", "-XX:+UseCGroupMemoryLimitForHeap",
+                "-cp", "/opt/lib/cassandra-sidecar/cassandra-sidecar.jar",
+                "com.instaclustr.cassandra.sidecar.SidecarRestore",
+                "-bb", backup.getSpec().getTarget(), // bucket name
+                "-c", dataCenterMetadata.getName(), // clusterID == DcName. Backup dc and restore dc must have the same name
+                "-bi", dataCenterChildObjectName("%s"), // pod name prefix
+                "-s", backup.getMetadata().getName(), // backup tag used to find the manifest file
+                "--bs", backup.getSpec().getBackupType(),
+                "-rs",
+                "--cd", "/tmp/sidecar-config-volume" // location where the restore task can write config fragments
+        ));
+        if ("FILE".equalsIgnoreCase(backup.getSpec().getBackupType())) {
+            command.add("--fl");
+            command.add(backup.getSpec().getTarget());
+        }
+        return Collections.unmodifiableList(command);
     }
 
     private V1Container fileLimitInit() {
@@ -377,9 +386,9 @@ public class DataCenterReconciliationController {
 
             // messy -- constructs via org.apache.cassandra.config.ParameterizedClass.ParameterizedClass(java.util.Map<java.lang.String,?>)
             config.put("seed_provider", ImmutableList.of(ImmutableMap.of(
-                            "class_name", "com.instaclustr.cassandra.k8s.SeedProvider",
-                            "parameters", ImmutableList.of(ImmutableMap.of("service", seedNodesService.getMetadata().getName()))
-                    )));
+                    "class_name", "com.instaclustr.cassandra.k8s.SeedProvider",
+                    "parameters", ImmutableList.of(ImmutableMap.of("service", seedNodesService.getMetadata().getName()))
+            )));
 
 
             config.put("endpoint_snitch", "org.apache.cassandra.locator.GossipingPropertyFileSnitch");
@@ -409,7 +418,7 @@ public class DataCenterReconciliationController {
         }
 
         // tune ulimits
-        configMapVolumeAddFile(configMap, volumeSource,  "cassandra-env.sh.d/002-cassandra-limits.sh",
+        configMapVolumeAddFile(configMap, volumeSource, "cassandra-env.sh.d/002-cassandra-limits.sh",
                 "ulimit -l unlimited\n" // unlimited locked memory
         );
 
@@ -573,7 +582,6 @@ public class DataCenterReconciliationController {
         logger.debug("Found {} pods.", pods.size());
 
 
-
         // check that all pods are running (note that Running != Ready)
         {
             final Multimap<String, V1Pod> podsByPhase = Multimaps.index(pods, pod -> pod.getStatus().getPhase());
@@ -581,7 +589,7 @@ public class DataCenterReconciliationController {
 
             if (notRunningPodsByPhase.size() > 0) {
                 logger.warn("Skipping StatefulSet reconciliation as some Pods are not in the Running phase: {}.",
-                    Multimaps.transformValues(notRunningPodsByPhase, (V1Pod p) -> p.getMetadata().getName())
+                        Multimaps.transformValues(notRunningPodsByPhase, (V1Pod p) -> p.getMetadata().getName())
                 );
 
                 return;

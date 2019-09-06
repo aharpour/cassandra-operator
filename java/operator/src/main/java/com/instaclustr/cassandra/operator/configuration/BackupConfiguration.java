@@ -15,7 +15,11 @@ public class BackupConfiguration {
         backupArguments.sharedContainerPath = Paths.get("/");
         backupArguments.snapshotTag = tag;
         backupArguments.storageProvider = provider;
-        backupArguments.backupBucket = target;
+        if (provider == StorageProvider.FILE) {
+            backupArguments.fileBackupDirectory = Paths.get(target);
+        } else {
+            backupArguments.backupBucket = target;
+        }
         backupArguments.offlineSnapshot = false;
         backupArguments.account = "";
         backupArguments.secret = "";
