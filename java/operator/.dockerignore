@@ -1,0 +1,6 @@
+src
+target
+*.iml
+*.xml
+!/target/cassandra-operator-*.jar
+!/src/main/docker

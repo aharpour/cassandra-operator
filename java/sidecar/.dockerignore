@@ -1,0 +1,6 @@
+src
+target
+*.iml
+*.xml
+!/target/cassandra-sidecar-*.jar
+!/src/main/docker
